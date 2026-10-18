@@ -51,7 +51,7 @@ function siteUrl(): string {
   if (typeof window !== "undefined" && window.location?.origin) {
     return window.location.origin;
   }
-  return "https://texas-climate-trends.vercel.app";
+  return "https://farmwth.com";
 }
 
 /** The `#` comment block at the top of every CSV. */

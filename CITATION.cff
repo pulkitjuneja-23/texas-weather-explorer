@@ -19,7 +19,7 @@ authors:
     affiliation: "Texas A&M AgriLife Research, Lubbock"
 license: MIT
 url: "https://farmwth.com"
-repository-code: "https://github.com/pulkitjuneja-23/texas-climate-trends"
+repository-code: "https://github.com/pulkitjuneja-23/texas-weather-explorer"
 keywords:
   - agriculture
   - weather

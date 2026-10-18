@@ -9,11 +9,11 @@
  * /gridpoints/{office}/{x},{y}/forecast returns 14 day/night periods = 7 days.
  */
 
-// The app has been renamed; the repository slug has not, and the repo is the
-// contact route NWS asks for — so the identifier is new and the address is
-// still the one that resolves.
+// NWS asks for a way to reach whoever runs the client; the repository's issues
+// are that route. The repository was renamed to match the site on 19 October
+// 2026; the old address still forwards.
 const UA =
-  "TexasWeatherExplorer/0.1 (github.com/pulkitjuneja-23/texas-climate-trends; contact via repo issues)";
+  "TexasWeatherExplorer/0.1 (github.com/pulkitjuneja-23/texas-weather-explorer; contact via repo issues)";
 
 export interface NWSPeriod {
   number: number;
