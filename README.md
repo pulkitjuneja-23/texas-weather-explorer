@@ -2,6 +2,8 @@
 
 **Live at [farmwth.com](https://farmwth.com)**
 
+[![DOI](https://zenodo.org/badge/1346233520.svg)](https://doi.org/10.5281/zenodo.23460344)
+
 Weather apps tell you about the next few days. I built Texas Weather Explorer for growers who want
 the longer picture: how this season compares with the last 30 years at their own field, which
 past years looked like this one, and what happened in those years.
