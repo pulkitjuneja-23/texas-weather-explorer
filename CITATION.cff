@@ -3,6 +3,7 @@ message: "If you use this software, please cite it as below."
 type: software
 title: "Texas Weather Explorer"
 doi: 10.5281/zenodo.23460344
+date-released: 2026-10-19
 abstract: >-
   A farmer-facing website showing 30 years of daily weather history for any
   point in Texas, with a visible choice of data source, season-to-date
