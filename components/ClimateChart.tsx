@@ -91,7 +91,16 @@ const CURRENT_VAR = "--series-1";
  */
 const DISTINCT_COLOURS = SERIES_VARS.length;
 
-export type ViewMode = "daily" | "accumulated";
+/**
+ * The three ways a year can be read, in the order the buttons show them:
+ * Season to date · Month by month · Day by day.
+ *
+ * The middle button is deliberately neutral. Whether one month is a TOTAL or an
+ * AVERAGE depends on the variable (see `MONTHLY_AGG`), and the badge beside the
+ * unit says which, so the button never calls rainfall an "average" or a
+ * temperature a "total".
+ */
+export type ViewMode = "accumulated" | "monthly" | "daily";
 
 const VARIABLES: Array<{
   field: Field;
@@ -140,26 +149,162 @@ const MONTH_INDICES: number[][] = (() => {
 })();
 
 /**
- * Collapse a year to monthly totals, written back across every day of each
- * month so the existing 366-row chart machinery can draw it as a step.
- * Summing the prorated daily values recovers OpenET's original monthly figure
- * exactly.
+ * What one month of each variable is: a total, or an average of its days.
+ *
+ * Amounts that pile up (rain, water used, water demand, degree days, and the
+ * balance between rain and use) are TOTALS — "the average daily rainfall in
+ * July" is the mean of mostly-zero days and means nothing to anyone. Levels
+ * (temperatures, the day-night swing) are AVERAGES of the days, which is how
+ * NOAA and extension monthly summaries report them.
  */
-function toMonthlyTotals(ys: YearSeries): YearSeries {
+const MONTHLY_AGG: Record<Field, "sum" | "mean"> = {
+  precip: "sum",
+  gdd: "sum",
+  et: "sum",
+  balance: "sum",
+  eto: "sum",
+  tmax: "mean",
+  tmin: "mean",
+  tmean: "mean",
+  dtr: "mean",
+};
+
+/** Temperatures get the month's hottest day and coldest night on hover. */
+const EXTREME_FIELDS: Field[] = ["tmax", "tmin", "tmean"];
+
+/**
+ * A month with fewer than this share of its days reported is left blank.
+ *
+ * The same 90% the season tiles and the trend chart use. Rain arrives on a few
+ * days, so a total over a gappy month is not slightly low, it can be most of
+ * the rain missing — measured at Muleshoe on 25 August 2026.
+ */
+const MONTH_MIN_COVERAGE = 0.9;
+
+const FEB29 = KEY_INDEX.get("02-29");
+
+function isLeap(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+interface MonthlySeries extends YearSeries {
+  /** Months (0-11) that had some days but too few to stand for the month. */
+  dropped: number[];
+  /** Month (0-11) that is still in progress, or -1 when every month is whole. */
+  partialMonth: number;
+  /** Day index of the last day the partial month includes. */
+  partialThrough: number;
+}
+
+/**
+ * Collapse a year to one figure per month, written back across the days of
+ * that month so the existing 366-row chart machinery can draw it as a step.
+ *
+ * Only days inside the chart's window count, so a window starting 15 March
+ * gives a March of 15-31 March, for every year and for the band alike.
+ *
+ * `inProgress` marks the current year. Its last month is usually unfinished:
+ * that month is computed over the days so far, flagged in `partialMonth`, and
+ * written only up to the last day it covers, so the faded step stops where the
+ * data does instead of running on to the end of the month. Summing OpenET's
+ * prorated daily values recovers its original monthly figure exactly, and a
+ * month it publishes is always whole, so it is never flagged as partial.
+ */
+function toMonthly(
+  ys: YearSeries,
+  agg: "sum" | "mean",
+  startIdx: number,
+  endIdx: number,
+  inProgress: boolean
+): MonthlySeries {
   const out = new Array<number | null>(DOY_KEYS.length).fill(null);
-  for (const idxs of MONTH_INDICES) {
+  let lastReal = -1;
+  if (inProgress) {
+    for (let i = DOY_KEYS.length - 1; i >= 0; i--) {
+      const v = ys.values[i];
+      if (v !== null && Number.isFinite(v)) {
+        lastReal = i;
+        break;
+      }
+    }
+  }
+  const leap = isLeap(ys.year);
+  const dropped: number[] = [];
+  let partialMonth = -1;
+  let partialThrough = -1;
+
+  MONTH_INDICES.forEach((all, m) => {
+    let idxs = all.filter((i) => i >= startIdx && i <= endIdx);
+    if (!idxs.length) return;
+    let partial = false;
+    if (inProgress) {
+      if (lastReal < idxs[0]) return; // the month has not started yet
+      const last = idxs[idxs.length - 1];
+      // 29 February in a non-leap year is not a day the month is waiting for.
+      const lastExpected = !leap && last === FEB29 ? last - 1 : last;
+      if (lastReal < lastExpected) {
+        partial = true;
+        idxs = idxs.filter((i) => i <= lastReal);
+      }
+    }
+    const expected = idxs.filter((i) => leap || i !== FEB29).length;
     let sum = 0;
-    let any = false;
+    let n = 0;
     for (const i of idxs) {
       const v = ys.values[i];
       if (v !== null && Number.isFinite(v)) {
         sum += v;
-        any = true;
+        n++;
       }
     }
-    if (any) for (const i of idxs) out[i] = sum;
-  }
-  return { year: ys.year, values: out };
+    if (!expected || n / expected < MONTH_MIN_COVERAGE) {
+      // A month with NO days is simply outside the record (water use before
+      // late 2015); one with SOME is a gap, and gaps are always named.
+      if (n > 0) dropped.push(m);
+      return;
+    }
+    const value = agg === "sum" ? sum : sum / n;
+    for (const i of idxs) out[i] = value;
+    if (partial) {
+      partialMonth = m;
+      partialThrough = idxs[idxs.length - 1];
+    }
+  });
+
+  return { year: ys.year, values: out, dropped, partialMonth, partialThrough };
+}
+
+interface MonthExtremes {
+  hi: number | null;
+  hiIdx: number;
+  lo: number | null;
+  loIdx: number;
+}
+
+/** Hottest day (highest high) and coldest night (lowest low) of each month. */
+function monthExtremes(
+  tmax: YearSeries | undefined,
+  tmin: YearSeries | undefined,
+  startIdx: number,
+  endIdx: number
+): MonthExtremes[] {
+  return MONTH_INDICES.map((all) => {
+    const e: MonthExtremes = { hi: null, hiIdx: -1, lo: null, loIdx: -1 };
+    for (const i of all) {
+      if (i < startIdx || i > endIdx) continue;
+      const h = tmax?.values[i];
+      if (h !== null && h !== undefined && Number.isFinite(h) && (e.hi === null || h > e.hi)) {
+        e.hi = h;
+        e.hiIdx = i;
+      }
+      const l = tmin?.values[i];
+      if (l !== null && l !== undefined && Number.isFinite(l) && (e.lo === null || l < e.lo)) {
+        e.lo = l;
+        e.loIdx = i;
+      }
+    }
+    return e;
+  });
 }
 
 const MONTH_TICKS = [
@@ -167,6 +312,10 @@ const MONTH_TICKS = [
   "07-01", "08-01", "09-01", "10-01", "11-01", "12-01",
 ];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_LONG = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 interface Props {
   records: DailyRecord[];
@@ -315,7 +464,21 @@ export default function ClimateChart(props: Props) {
   const varLabel =
     varDef.field === "gdd" && gddCrop ? `${varDef.label} — ${gddCrop}` : varDef.label;
   const quantity = varDef.quantity;
-  const effectiveMode: ViewMode = varDef.accumulable ? mode : "daily";
+  /*
+    The view each variable can actually be read in. A temperature has no season
+    to date (summing temperatures means nothing), and water use is published
+    once a month so it has no day by day; either falls back to its nearest
+    honest view rather than drawing something false. The page keeps the chosen
+    mode, so switching from rainfall by month to temperature stays by month.
+  */
+  const effectiveMode: ViewMode =
+    mode === "accumulated" && !varDef.accumulable
+      ? "daily"
+      : mode === "daily" && isMonthlySource
+      ? "monthly"
+      : mode;
+  const monthlyAgg = MONTHLY_AGG[field];
+  const showExtremes = effectiveMode === "monthly" && EXTREME_FIELDS.includes(field);
 
   const {
     rows,
@@ -325,6 +488,9 @@ export default function ClimateChart(props: Props) {
     bandYearCount,
     bandFirstYear,
     bandLastYear,
+    partial,
+    extremes,
+    gaps,
   } = useMemo(() => {
     const series = alignByYear(records, field, gddConfig);
     // Normals exclude the in-progress year — a partial year would drag the
@@ -354,16 +520,17 @@ export default function ClimateChart(props: Props) {
         ? yearsWithData.filter((s) => !hasLongGap(s, maxGap) && startsWithin(s, startIdx, maxGap))
         : baseline;
 
-    // A monthly source shown "day by day" becomes monthly totals, unsmoothed —
-    // a ±7-day window would bleed one month's figure into the next.
-    const monthlyView = isMonthlySource && effectiveMode === "daily";
+    // Month by month is never smoothed: a ±7-day window would bleed one month's
+    // figure into the next. The band comes from each past year's own monthly
+    // figure, so "middle 50%" means half of past Julys, not of past July days.
+    const monthlyView = effectiveMode === "monthly";
 
     const stats: DayStat[] =
       effectiveMode === "accumulated"
         ? accumClimatology(bandYears, startIdx, maxGap)
         : monthlyView
         ? dailyClimatology(
-            baseline.filter((s) => s.values.some((v) => v !== null)).map(toMonthlyTotals),
+            yearsWithData.map((s) => toMonthly(s, monthlyAgg, startIdx, endIdx, false)),
             { window: 0 }
           )
         : dailyClimatology(baseline, { window: smoothing });
@@ -379,16 +546,43 @@ export default function ClimateChart(props: Props) {
     );
 
     const curves = new Map<number, (number | null)[]>();
+    /** The current year's unfinished month, drawn as its own faded step. */
+    let partial: { year: number; month: number; through: number; values: (number | null)[] } | null =
+      null;
+    /** Months of the drawn years left blank for missing too many days. */
+    const gaps: string[] = [];
     for (const y of shown) {
       const ys = byYear.get(y)!;
-      curves.set(
-        y,
-        effectiveMode === "accumulated"
-          ? accumulate(ys, startIdx, maxGap).values
-          : monthlyView
-          ? toMonthlyTotals(ys).values
-          : ys.values
-      );
+      if (monthlyView) {
+        const m = toMonthly(ys, monthlyAgg, startIdx, endIdx, y === currentYear);
+        for (const d of m.dropped) gaps.push(`${MONTH_NAMES[d]} ${y}`);
+        if (m.partialMonth >= 0) {
+          // Split the unfinished month off the whole ones.
+          const whole = m.values.slice();
+          const part = new Array<number | null>(DOY_KEYS.length).fill(null);
+          for (const i of MONTH_INDICES[m.partialMonth]) {
+            part[i] = whole[i];
+            whole[i] = null;
+          }
+          partial = { year: y, month: m.partialMonth, through: m.partialThrough, values: part };
+          curves.set(y, whole);
+        } else {
+          curves.set(y, m.values);
+        }
+      } else {
+        curves.set(
+          y,
+          effectiveMode === "accumulated" ? accumulate(ys, startIdx, maxGap).values : ys.values
+        );
+      }
+    }
+
+    // Hottest day and coldest night per month, for the hover box and the CSV.
+    const extremes = new Map<number, MonthExtremes[]>();
+    if (showExtremes) {
+      const hi = new Map(alignByYear(records, "tmax", gddConfig).map((s) => [s.year, s]));
+      const lo = new Map(alignByYear(records, "tmin", gddConfig).map((s) => [s.year, s]));
+      for (const y of shown) extremes.set(y, monthExtremes(hi.get(y), lo.get(y), startIdx, endIdx));
     }
 
     /*
@@ -416,6 +610,10 @@ export default function ClimateChart(props: Props) {
         const v = curves.get(y)![i];
         row[`y${y}`] = v === null ? null : convert(v, quantity, units);
       }
+      if (partial) {
+        const v = partial.values[i];
+        row[`y${partial.year}p`] = v === null ? null : convert(v, quantity, units);
+      }
       rows.push(row);
     }
 
@@ -427,8 +625,11 @@ export default function ClimateChart(props: Props) {
       bandYearCount,
       bandFirstYear,
       bandLastYear,
+      partial: partial as { year: number; month: number; through: number } | null,
+      extremes,
+      gaps,
     };
-  }, [records, field, effectiveMode, compareYears, currentYear, showCurrent, units, gddConfig, smoothing, quantity, startIdx, endIdx]);
+  }, [records, field, effectiveMode, compareYears, currentYear, showCurrent, units, gddConfig, smoothing, quantity, startIdx, endIdx, monthlyAgg, showExtremes]);
 
   /**
    * Month starts, but only the ones inside the window.
@@ -514,19 +715,55 @@ export default function ClimateChart(props: Props) {
    * makes a single year interpretable — a column of rainfall totals with no
    * sense of what is normal is the thing this whole app exists to replace.
    */
+  const monthlyWord = monthlyAgg === "sum" ? "total" : "average";
   const viewLabel =
     effectiveMode === "accumulated"
       ? "season-to-date accumulation"
-      : isMonthlySource
-      ? "monthly totals"
+      : effectiveMode === "monthly"
+      ? `month by month (monthly ${monthlyWord})`
       : "day by day";
 
+  /** A year's value on a row, whole month or the unfinished one. */
+  function yearValue(r: Row, y: number): number | null {
+    const v = r[`y${y}`];
+    if (typeof v === "number") return v;
+    const p = partial && partial.year === y ? r[`y${y}p`] : undefined;
+    return typeof p === "number" ? p : null;
+  }
+
+  /** In month by month, one row per month: the first day of it in the window. */
+  const monthRows = useMemo(
+    () => rows.filter((r, i) => i === 0 || r.key.slice(0, 2) !== rows[i - 1].key.slice(0, 2)),
+    [rows]
+  );
+
+  const partialNote = partial
+    ? `${MONTH_LONG[partial.month]} ${partial.year} is not finished: its figure covers ` +
+      `${keyToLabel(DOY_KEYS[Math.max(MONTH_INDICES[partial.month][0], startIdx)])} to ` +
+      `${keyToLabel(DOY_KEYS[partial.through])} only, so it is not yet comparable with the normal.`
+    : null;
+
+  function extremeOf(y: number, r: Row) {
+    const m = Number(r.key.slice(0, 2)) - 1;
+    const e = extremes.get(y)?.[m];
+    if (!e || yearValue(r, y) === null) return null;
+    return e;
+  }
+
   function csvForChart() {
+    const monthly = effectiveMode === "monthly";
     const csv = buildCsv(
-      rows,
+      monthly ? monthRows : rows,
       [
-        { header: "month_day", value: (r) => r.key },
-        { header: "date_label", value: (r) => r.label },
+        ...(monthly
+          ? [
+              { header: "month", value: (r: Row) => r.key.slice(0, 2) },
+              { header: "month_label", value: (r: Row) => MONTH_LONG[Number(r.key.slice(0, 2)) - 1] },
+            ]
+          : [
+              { header: "month_day", value: (r: Row) => r.key },
+              { header: "date_label", value: (r: Row) => r.label },
+            ]),
         // The long-term average and the years actually plotted, nothing else.
         // The percentile columns were dropped at the user's request: they made
         // the file wide and are trivially recomputed from the raw record by
@@ -534,10 +771,29 @@ export default function ClimateChart(props: Props) {
         ...(showNormal
           ? [{ header: `long_term_average_${unit}`, value: (r: Row) => fmt(r.normal) }]
           : []),
-        ...seriesYears.map((y) => ({
-          header: String(y),
-          value: (r: Row) => fmt(r[`y${y}`] as number | null | undefined),
-        })),
+        ...seriesYears.flatMap((y) => [
+          { header: String(y), value: (r: Row) => fmt(yearValue(r, y)) },
+          // For temperatures by month, the hover box's extremes are worth
+          // having in a spreadsheet too: heat stress and frost risk live there.
+          ...(monthly && showExtremes
+            ? [
+                {
+                  header: `${y}_hottest_day_${unit}`,
+                  value: (r: Row) => {
+                    const e = extremeOf(y, r);
+                    return e?.hi == null ? "" : fmt(convert(e.hi, "temp", units));
+                  },
+                },
+                {
+                  header: `${y}_coldest_night_${unit}`,
+                  value: (r: Row) => {
+                    const e = extremeOf(y, r);
+                    return e?.lo == null ? "" : fmt(convert(e.lo, "temp", units));
+                  },
+                },
+              ]
+            : []),
+        ]),
       ],
       csvHeader(exportContext, [
         `Chart: Season tracker — ${varLabel}`,
@@ -546,9 +802,13 @@ export default function ClimateChart(props: Props) {
         `Normal band: ${bandYearCount} years` +
           (bandFirstYear && bandLastYear ? ` (${bandFirstYear}–${bandLastYear})` : "") +
           (excludedFromBand > 0 ? `, ${excludedFromBand} left out as incomplete` : ""),
-        effectiveMode === "daily" && !isMonthlySource
+        effectiveMode === "daily"
           ? `Smoothing: ±${smoothing}-day window on the long-term average`
           : "Smoothing: none",
+        ...(monthly
+          ? [`A month with under ${MONTH_MIN_COVERAGE * 100}% of its days reported is left blank.`]
+          : []),
+        ...(monthly && partialNote ? [partialNote] : []),
       ])
     );
     return {
@@ -568,7 +828,12 @@ export default function ClimateChart(props: Props) {
         title: `Season tracker — ${varLabel}`,
         subtitle:
           `${exportContext?.placeName ? `${exportContext.placeName} · ` : ""}` +
-          `${viewLabel} · ${unit} · normal from ${bandYearCount} years`,
+          `${viewLabel} · ${unit} · normal from ${bandYearCount} years` +
+          // A faded step is meaningless in a figure read away from the page.
+          (effectiveMode === "monthly" && partial
+            ? ` · faded: ${MONTH_LONG[partial.month]} ${partial.year} so far, to ` +
+              `${keyToLabel(DOY_KEYS[partial.through])}, not yet comparable with the normal`
+            : ""),
         footer: figureFooter(exportContext, `as of ${formatDate(lastObserved)}`),
         // Redrawn because the on-screen legend is HTML outside the SVG. The
         // bands are the context that makes a single year readable, so a figure
@@ -651,8 +916,8 @@ export default function ClimateChart(props: Props) {
           {varLabel}
           {effectiveMode === "accumulated"
             ? " · season to date"
-            : isMonthlySource
-            ? " · monthly total"
+            : effectiveMode === "monthly"
+            ? ` · monthly ${monthlyWord}`
             : ""}{" "}
           · {unit}
         </span>
@@ -674,8 +939,11 @@ export default function ClimateChart(props: Props) {
             onChange={(e) => {
               const f = e.target.value as Field;
               onFieldChange(f);
+              // Someone reading month by month is usually comparing variables
+              // by month, so that view survives a change of variable. The
+              // other two reset to what suits the new variable.
               const def = VARIABLES.find((v) => v.field === f);
-              if (def) onModeChange(def.defaultMode);
+              if (def && mode !== "monthly") onModeChange(def.defaultMode);
             }}
           >
             {VARIABLES.map((v) => (
@@ -686,30 +954,38 @@ export default function ClimateChart(props: Props) {
           </select>
         </div>
 
-        {varDef.accumulable && (
-          <div className="field">
-            <label>View</label>
-            <div className="seg">
+        {/* Only the views that suit this variable are offered: no season to
+            date for a temperature, no day by day for monthly water data. */}
+        <div className="field">
+          <label>View</label>
+          <div className="seg view-seg">
+            {varDef.accumulable && (
               <button
                 aria-pressed={effectiveMode === "accumulated"}
                 onClick={() => onModeChange("accumulated")}
+                title="Running total from the first day shown"
               >
                 Season to date
               </button>
+            )}
+            <button
+              aria-pressed={effectiveMode === "monthly"}
+              onClick={() => onModeChange("monthly")}
+              title={`One figure per month: the monthly ${monthlyWord}`}
+            >
+              Month by month
+            </button>
+            {!isMonthlySource && (
               <button
                 aria-pressed={effectiveMode === "daily"}
                 onClick={() => onModeChange("daily")}
-                title={
-                  isMonthlySource
-                    ? "This data is published once a month, so it is shown by month."
-                    : undefined
-                }
+                title="Every day as it was measured"
               >
-                {isMonthlySource ? "Monthly" : "Day by day"}
+                Day by day
               </button>
-            </div>
+            )}
           </div>
-        )}
+        </div>
 
         {/*
           The slice of the year to draw.
@@ -997,9 +1273,28 @@ export default function ClimateChart(props: Props) {
                 connectNulls={false}
                 isAnimationActive={false}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--surface)" }}
-                label={endLabel(`y${y}`, y)}
+                // The year's name goes at the very end of its line, which is
+                // the unfinished month's step when there is one.
+                label={partial?.year === y ? false : endLabel(`y${y}`, y)}
               />
             ))}
+
+            {/* This month so far: the same colour, faded, and stopping on the
+                last day it covers so it cannot be read as a finished month. */}
+            {partial && (
+              <Line
+                key={`${partial.year}p`}
+                dataKey={`y${partial.year}p`}
+                stroke={colorFor(partial.year)}
+                strokeOpacity={0.4}
+                strokeWidth={2.5}
+                dot={false}
+                connectNulls={false}
+                isAnimationActive={false}
+                activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--surface)" }}
+                label={endLabel(`y${partial.year}p`, partial.year)}
+              />
+            )}
 
             <Tooltip
               cursor={{ stroke: "var(--text-muted)", strokeWidth: 1, strokeDasharray: "3 3" }}
@@ -1010,19 +1305,40 @@ export default function ClimateChart(props: Props) {
                 if (!row) return null;
                 return (
                   <div className="tt">
-                    <div className="tt-h">{row.label}</div>
+                    <div className="tt-h">
+                      {effectiveMode === "monthly"
+                        ? `${MONTH_LONG[Number(row.key.slice(0, 2)) - 1]} · monthly ${monthlyWord}`
+                        : row.label}
+                    </div>
                     {seriesYears.map((y) => {
-                      const v = row[`y${y}`];
-                      if (typeof v !== "number") return null;
+                      const v = yearValue(row, y);
+                      if (v === null) return null;
+                      const soFar =
+                        partial?.year === y && typeof row[`y${y}p`] === "number";
+                      const e = showExtremes ? extremeOf(y, row) : null;
                       return (
-                        <div className="tt-row" key={y}>
-                          <span className="lbl">
-                            <span className="swatch" style={{ background: colorFor(y) }} />
-                            {y}
-                          </span>
-                          <span className="val">
-                            {v.toFixed(dp)} {unit}
-                          </span>
+                        <div key={y}>
+                          <div className="tt-row">
+                            <span className="lbl">
+                              <span className="swatch" style={{ background: colorFor(y) }} />
+                              {y}
+                              {soFar && ` · so far, to ${keyToLabel(DOY_KEYS[partial!.through])}`}
+                            </span>
+                            <span className="val">
+                              {v.toFixed(dp)} {unit}
+                            </span>
+                          </div>
+                          {e && (e.hi !== null || e.lo !== null) && (
+                            <div className="tt-row tt-sub">
+                              <span className="lbl">
+                                {e.hi !== null &&
+                                  `hottest day ${convert(e.hi, "temp", units).toFixed(dp)} (${keyToLabel(DOY_KEYS[e.hiIdx])})`}
+                                {e.hi !== null && e.lo !== null && " · "}
+                                {e.lo !== null &&
+                                  `coldest night ${convert(e.lo, "temp", units).toFixed(dp)} (${keyToLabel(DOY_KEYS[e.loIdx])})`}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1056,6 +1372,24 @@ export default function ClimateChart(props: Props) {
       {varDef.hint && (
         <div className="small muted" style={{ marginTop: 8 }}>
           {varDef.hint}
+        </div>
+      )}
+
+      {effectiveMode === "monthly" && partial && (
+        <div className="small muted" style={{ marginTop: 8 }}>
+          <strong>
+            {MONTH_LONG[partial.month]} {partial.year} isn&apos;t over yet.
+          </strong>{" "}
+          The faded step is its {monthlyWord} so far, through{" "}
+          {keyToLabel(DOY_KEYS[partial.through])}, so it can&apos;t be compared with the normal
+          until the month ends.
+        </div>
+      )}
+
+      {effectiveMode === "monthly" && gaps.length > 0 && (
+        <div className="small muted" style={{ marginTop: 8 }}>
+          Left blank because fewer than {MONTH_MIN_COVERAGE * 100}% of their days were reported:{" "}
+          {gaps.join(", ")}.
         </div>
       )}
 
@@ -1107,7 +1441,7 @@ export default function ClimateChart(props: Props) {
           <table>
             <thead>
               <tr>
-                <th>Date</th>
+                <th>{effectiveMode === "monthly" ? "Month" : "Date"}</th>
                 <th>Average ({unit})</th>
                 <th>25th</th>
                 <th>75th</th>
@@ -1117,29 +1451,37 @@ export default function ClimateChart(props: Props) {
               </tr>
             </thead>
             <tbody>
-              {rows
-                .filter((_, i) => i % 7 === 0)
-                .map((r, i) => {
-                  const s = stats[i * 7];
-                  return (
-                    <tr key={r.key}>
-                      <td>{r.label}</td>
-                      <td>{typeof r.normal === "number" ? r.normal.toFixed(dp) : "—"}</td>
-                      <td>{r.band50 ? r.band50[0].toFixed(dp) : "—"}</td>
-                      <td>{r.band50 ? r.band50[1].toFixed(dp) : "—"}</td>
-                      {seriesYears.map((y) => {
-                        const v = r[`y${y}`];
-                        return (
-                          <td key={y}>{typeof v === "number" ? v.toFixed(dp) : "—"}</td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
+              {(effectiveMode === "monthly" ? monthRows : rows.filter((_, i) => i % 7 === 0)).map(
+                (r) => (
+                  <tr key={r.key}>
+                    <td>
+                      {effectiveMode === "monthly"
+                        ? MONTH_LONG[Number(r.key.slice(0, 2)) - 1]
+                        : r.label}
+                    </td>
+                    <td>{typeof r.normal === "number" ? r.normal.toFixed(dp) : "—"}</td>
+                    <td>{r.band50 ? r.band50[0].toFixed(dp) : "—"}</td>
+                    <td>{r.band50 ? r.band50[1].toFixed(dp) : "—"}</td>
+                    {seriesYears.map((y) => {
+                      const v = yearValue(r, y);
+                      const soFar = partial?.year === y && typeof r[`y${y}p`] === "number";
+                      return (
+                        <td key={y}>
+                          {v === null ? "—" : v.toFixed(dp)}
+                          {soFar && " (so far)"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                )
+              )}
             </tbody>
           </table>
           <div className="small muted" style={{ padding: "8px 11px" }}>
-            Every 7th day shown. {stats[0]?.n ?? 0} year-values pooled per normal
+            {effectiveMode === "monthly"
+              ? `One row per month (monthly ${monthlyWord}).`
+              : "Every 7th day shown."}{" "}
+            {stats[startIdx]?.n ?? 0} year-values pooled per normal
             {effectiveMode === "daily" ? ` (±${smoothing}-day window)` : ""}.
           </div>
         </div>

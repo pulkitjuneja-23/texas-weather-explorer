@@ -545,6 +545,11 @@ export default function Page() {
 
   useEffect(() => {
     if (!urlReady) return;
+    trackOnce("view", mode);
+  }, [mode, urlReady]);
+
+  useEffect(() => {
+    if (!urlReady) return;
     trackOnce("trend", trendField);
   }, [trendField, urlReady]);
 

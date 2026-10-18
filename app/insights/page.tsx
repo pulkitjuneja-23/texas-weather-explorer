@@ -101,6 +101,10 @@ const LABELS: Record<string, string> = {
   et: "Water used (ET)",
   balance: "Water balance",
   eto: "Reference ET",
+  // season chart views
+  accumulated: "Season to date",
+  monthly: "Month by month",
+  daily: "Day by day",
   // crops
   corn: "Corn / sorghum",
   cotton: "Cotton",
@@ -135,6 +139,7 @@ const LABELS: Record<string, string> = {
 const KIND_TITLES: Record<string, string> = {
   panel: "Which panel they opened",
   variable: "Which variable on the season chart",
+  view: "Which view on the season chart",
   trend: "Which variable on the year-by-year chart",
   crop: "Which crop, when looking at growing degree days",
   source: "Which dataset",
@@ -142,7 +147,7 @@ const KIND_TITLES: Record<string, string> = {
   export: "What they downloaded",
 };
 
-const KIND_ORDER = ["panel", "variable", "export", "trend", "crop", "source", "units"];
+const KIND_ORDER = ["panel", "variable", "view", "export", "trend", "crop", "source", "units"];
 
 function label(id: string): string {
   return LABELS[id] ?? id;

@@ -1961,6 +1961,14 @@ tbody tr:last-child td {
   font-weight: 600;
 }
 
+/* A note under a year's figure, e.g. that month's hottest day and coldest
+   night. Indented past the swatch so it reads as belonging to the row above. */
+.tt-row.tt-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0 0 3px 16px;
+}
+
 /* ---------- map ---------- */
 
 .map-shell {
@@ -2219,6 +2227,20 @@ tbody tr:last-child td {
 
   .seg button + button {
     border-left: 1px solid var(--border);
+  }
+
+  /* The season chart's three views share one row in equal thirds, a label
+     breaking onto two lines if it must. Wrapping the buttons instead left
+     "Day by day" alone on a second row, reading as a separate control. */
+  .seg.view-seg {
+    flex-wrap: nowrap;
+  }
+
+  .seg.view-seg button {
+    flex: 1 1 0;
+    white-space: normal;
+    line-height: 1.2;
+    padding: 7px 6px;
   }
 
   /* Nothing may be wider than the screen. */
