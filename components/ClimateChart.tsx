@@ -648,7 +648,18 @@ export default function ClimateChart(props: Props) {
     });
 
     let picked: string[];
-    if (inWindow.length >= 2) {
+    if (effectiveMode === "monthly") {
+      /*
+        MONTH BY MONTH NAMES EACH MONTH AT ITS MIDDLE. There a month is a
+        block, so its name belongs under the block, as on any monthly bar
+        chart. In the other two views the label marks the FIRST DAY of the
+        month, which is correct there and stays. A month cut short by the
+        window is named at the middle of the part that is shown.
+      */
+      picked = MONTH_INDICES.map((all) => all.filter((i) => i >= startIdx && i <= endIdx))
+        .filter((idxs) => idxs.length > 0)
+        .map((idxs) => DOY_KEYS[idxs[Math.floor(idxs.length / 2)]]);
+    } else if (inWindow.length >= 2) {
       picked = inWindow;
     } else {
       const ends = [DOY_KEYS[startIdx], DOY_KEYS[endIdx]];
@@ -674,7 +685,7 @@ export default function ClimateChart(props: Props) {
     if (picked.length <= maxLabels) return picked;
     const step = Math.ceil(picked.length / maxLabels);
     return picked.filter((_, i) => i % step === 0);
-  }, [startIdx, endIdx, chartWidth]);
+  }, [startIdx, endIdx, chartWidth, effectiveMode]);
 
   const unit = unitLabel(quantity, units);
   const dp = decimals(quantity, units);
@@ -1183,6 +1194,8 @@ export default function ClimateChart(props: Props) {
               tickFormatter={(k: string) => {
                 const [mm, dd] = k.split("-");
                 const name = MONTH_NAMES[Number(mm) - 1];
+                // By month the tick sits mid-month and names the whole month.
+                if (effectiveMode === "monthly") return name;
                 return dd === "01" ? name : `${name} ${Number(dd)}`;
               }}
               tick={{ fill: "var(--text-muted)", fontSize: 11 }}
