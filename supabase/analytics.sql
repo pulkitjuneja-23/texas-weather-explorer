@@ -57,6 +57,17 @@ create index if not exists events_session_idx on events (session);
 
 alter table events enable row level security;
 
+-- WHO MAY USE THESE TABLES AT ALL. From 30 October 2026 Supabase no longer
+-- grants the Data API access to a NEW table automatically, so a table created
+-- after that date (including from this file in a fresh project) answers
+-- "permission denied" until granted, and the site's silent write side would
+-- lose every visit without a sound, as it did in September. Only the service
+-- key is ever used, so only that role is granted; the public keys get nothing.
+-- Harmless to re-run on tables that already exist.
+grant select, insert, update, delete on public.visits to service_role;
+grant select, insert, update, delete on public.events to service_role;
+revoke all on public.visits, public.events from anon, authenticated;
+
 -- Handy checks:
 --   select date(at) as day, count(*) from visits where not self group by 1 order by 1 desc limit 30;
 --   select coalesce(county_name, '(outside Texas)') as county, count(*) as looks

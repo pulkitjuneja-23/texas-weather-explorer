@@ -47,6 +47,16 @@ create index if not exists cache_entries_fetched_idx      on cache_entries (fetc
 -- server and must never appear in browser code or in the repository.
 alter table cache_entries enable row level security;
 
+-- WHO MAY USE THE TABLE AT ALL. From 30 October 2026 Supabase no longer grants
+-- the Data API access to a NEW table automatically: a table created after that
+-- date, including one re-created from this file in a fresh project, answers
+-- "permission denied" until it is granted. The site only ever uses the service
+-- key, so only that role is granted; the public anon and authenticated keys get
+-- nothing, which also means they stay locked out even if RLS were ever switched
+-- off by mistake. Harmless to re-run on a table that already exists.
+grant select, insert, update, delete on public.cache_entries to service_role;
+revoke all on public.cache_entries from anon, authenticated;
+
 
 -- ---------------------------------------------------------------------------
 -- Eviction
